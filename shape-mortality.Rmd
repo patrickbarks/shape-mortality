@@ -24,7 +24,6 @@ Whereas most animal species exhibit age-related increases in mortality and decli
 #### Install required packages
 
 ```{r, eval=FALSE}
-devtools::install_github("jschoeley/pash")
 devtools::install_github("jonesor/Rcompadre")
 devtools::install_github("patrickbarks/Rage", ref = "devel")
 install.packages("tidyverse")
@@ -35,29 +34,18 @@ install.packages("tidyverse")
 ```{r, message=FALSE}
 library(Rcompadre)
 library(Rage)
-library(pash)
 library(tidyverse)
 ```
 
-#### Function to calculate the shape of a mortality trajectory
-
-The life table coefficient of variation is one way to measure the 'shape' of a mortality trajectory. Values greater than zero indicate that mortality tends to increase with age (i.e. senescence), whereas values less than zero indicate that mortality tends to decline with age (i.e. negative senescence).
+#### Helper functions
 
 ```{r}
-# calculate life table coefficient of variation
-shape_mortality <- function(matU, startLife, first_rep, N = 1000) {
-  lx <- mpm_to_lx(matU, startLife = startLife, N = N)
-  xmax <- max(which(lx > 1e-07))
-  if ((xmax - first_rep) < 5) {
-    return(NA_real_)
-  } else {
-    lx <- lx[first_rep:xmax]
-  }
-  x <- seq_along(lx) - 1
-  ps <- try(pash::Inputlx(x, lx), silent = TRUE)
-  if (class(ps) == 'try-error') return(NA_real_)
-  shape <- pash::GetShape(ps, type = 'cv', harmonized = TRUE)
-  return(shape)
+# subset lx trajectory to range t1:t2 (where t1 and t2 are the age of first
+#  repro and time to quasi-stable distribution, respectively)
+lx_sub <- function(lx, t1, t2) {
+  lx <- lx[t1:t2] / lx[t1]
+  lx <- lx[lx > 0]
+  return(lx)
 }
 ```
 
@@ -106,36 +94,44 @@ comp_shape <- comp_mean %>%
   mutate(check_zero_F = map_lgl(matF, ~ all(.x == 0))) %>% 
   filter(check_zero_F == FALSE, SurvivalIssue <= 1.0) %>% 
   mutate(start = mpm_first_active(.)) %>% 
+  mutate(perennial = map2_lgl(matU, start, ~ mpm_to_lx(.x, .y, N = 3)[4] > 0)) %>% 
+  filter(perennial == TRUE) %>% 
   mutate(la = pmap_dbl(list(matU, matF, start), mature_age)) %>% 
-  filter(la < 300) %>% 
-  mutate(shape = pmap_dbl(list(matU, start, la), shape_mortality)) %>%
-  mutate(id = as.factor(1:n())) %>% 
-  filter(!is.na(shape))
+  mutate(la = map_int(la, ~ max(as.integer(round(.x, 0)), 1L))) %>% 
+  mutate(q = map2_int(matU, start, ~ qsdConverge(matU = .x, startLife = .y,
+                                                 conv = 0.01, N = 2000))) %>% 
+  mutate(q = ifelse(is.na(q), 2000, q)) %>% 
+  filter(q - la >= 3) %>% 
+  mutate(lx = map2(matU, start, mpm_to_lx, N = 2000)) %>%
+  mutate(lxs = pmap(list(lx, la, q+1), lx_sub)) %>%
+  mutate(lxs_max = map_dbl(lxs, ~ .x[length(.x)])) %>% 
+  mutate(shape = map_dbl(lxs, shape_surv)) %>%
+  mutate(l0 = map2_dbl(matU, start, lifeExpectancy)) %>% 
+  mutate(id = as.factor(1:n()))
 ```
 
 #### Example mortality trajectories
 
-Below I show examples of two mortality trajectories: a trajectory of declining mortality from the coniferous tree species _Juniperus procera_, and a trajectory of increasing mortality from the tropical tree species _Oxandra asbeckii_.
+Below I show examples of two mortality trajectories: a trajectory of declining mortality from the coniferous tree species _Phyllanthus emblica_, and a trajectory of increasing mortality from the tropical tree species _Oxandra asbeckii_.
 
 ```{r, warning=FALSE, fig.height=3.5, fig.width=6.5, dpi=200}
 example <- comp_shape %>%
-  filter(SpeciesAuthor %in% c("Juniperus_procera", "Oxandra_asbeckii")) %>%
-  mutate(age = list(0:100)) %>%
-  mutate(lx = map2(matU, start, mpm_to_lx, N = 500)) %>%
-  mutate(hazard = map2(lx, la, ~ lx_to_hx(.x[.y:(.y+100)]))) %>% 
+  filter(SpeciesAuthor %in% c("Phyllanthus_emblica_2", "Oxandra_asbeckii")) %>%
+  mutate(age = list(0:50)) %>%
+  mutate(hazard = map(lxs, ~ lx_to_hx(.x)[1:51])) %>% 
   CompadreData() %>%
   select(SpeciesAuthor, age, hazard) %>%
   unnest()
 
 example_cv <- comp_shape %>%
-  filter(SpeciesAuthor %in% c("Juniperus_procera", "Oxandra_asbeckii")) %>%
+  filter(SpeciesAuthor %in% c("Phyllanthus_emblica_2", "Oxandra_asbeckii")) %>%
   CompadreData() %>%
   select(SpeciesAuthor, shape) %>%
   mutate(label = paste0("shape_mortality==", formatC(shape, format = "f", digits = 3)))
 
 ggplot(example) +
   geom_line(aes(age, hazard)) +
-  geom_text(data = example_cv, aes(x = 20, y = Inf, label = label),
+  geom_text(data = example_cv, aes(x = 10, y = Inf, label = label),
             hjust = 0, vjust = 1.8, parse = TRUE) +
   facet_wrap(~ SpeciesAuthor, scales = "free_y") +
   expand_limits(y = 0) +
@@ -151,8 +147,6 @@ ggplot(comp_shape, aes(fct_reorder(id, shape))) +
   geom_point(aes(y = shape), size = 2, alpha = 0.5, pch = 21) +
   geom_hline(yintercept = 0, linetype = 2, alpha = 0.5) +
   scale_x_discrete(expand = c(0.015, 0)) +
-  scale_y_continuous(breaks = seq(-5, 1, 1)) +
-  coord_cartesian(ylim = c(-4, 1)) +
-  labs(x = "Species (ranked)", y = "Shape mortality (life table CV)") +
+  labs(x = "Species (ranked)", y = "Shape of mortality distribution") +
   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
 ```

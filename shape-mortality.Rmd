@@ -35,6 +35,9 @@ install.packages("tidyverse")
 library(Rcompadre)
 library(Rage)
 library(tidyverse)
+library(rgdal)
+library(rgeos)
+library(maptools)
 ```
 
 #### Helper functions
@@ -99,7 +102,8 @@ comp_shape <- comp_mean %>%
   mutate(la = pmap_dbl(list(matU, matF, start), mature_age)) %>% 
   mutate(la = map_int(la, ~ max(as.integer(round(.x, 0)), 1L))) %>% 
   mutate(q = map2_int(matU, start, ~ qsdConverge(matU = .x, startLife = .y,
-                                                 conv = 0.01, N = 2000))) %>% 
+                                                 conv = 0.01, N = 2000,
+                                                 ergodicFix = TRUE))) %>% 
   mutate(q = ifelse(is.na(q), 2000, q)) %>% 
   filter(q - la >= 3) %>% 
   mutate(lx = map2(matU, start, mpm_to_lx, N = 2000)) %>%
@@ -149,4 +153,51 @@ ggplot(comp_shape, aes(fct_reorder(id, shape))) +
   scale_x_discrete(expand = c(0.015, 0)) +
   labs(x = "Species (ranked)", y = "Shape of mortality distribution") +
   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+```
+
+#### Biomes plot
+
+```{r}
+# read ecoregions shapefile
+ecoregions <- readOGR(dsn = "ecoregions", layer = "wwf_terr_ecos")
+
+# aggregate by biome, and simplify polygons
+biomes <- ecoregions %>% 
+  unionSpatialPolygons(ecoregions@data$BIOME) %>% 
+  gSimplify(tol = 0.1)
+
+# read df with biome names
+biome_names <- read.csv("biome_names.csv") %>% 
+  mutate(biome = factor(biome, levels = biome))
+
+# fortify for plotting
+biomes_tidy <- fortify(biomes) %>% 
+  as_tibble() %>% 
+  mutate(id = as.integer(id)) %>% 
+  left_join(biome_names, by = "id") %>% 
+  filter(lat > -56) %>% 
+  filter(biome != "Lake")
+
+# plot colors
+biome_cols <- c(
+  viridis::viridis(10),
+  # med, desert
+  "#ff7f00",
+  "#b15928",
+  # mangrove
+  "#fb9a99",
+  # tundra, ice
+  "grey75",
+  "grey50"
+)
+
+# plot
+ggplot(biomes_tidy) +
+  geom_polygon(aes(long, lat, group = group, fill = biome), alpha = 0.8) +
+  scale_fill_manual(name = NULL, values = biome_cols, guide = guide_legend(nrow = 5)) +
+  labs(x = NULL, y = NULL) +
+  theme(legend.position = "bottom",
+        panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
 ```
